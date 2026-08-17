@@ -1,0 +1,10 @@
+{
+  "recipients": ["alice@example.com", "bob@example.com"],
+  "dateTime": ["2026-08-17T17:06:39Z"],
+  "message": "The v2.1.0 release has been deployed to production.",
+  "links": [
+    { "title": "Release notes", "url": "https://example.com/releases/2.1.0" },
+    { "title": "Runbook", "url": "https://example.com/runbook" }
+  ],
+  "type": "info"
+}
