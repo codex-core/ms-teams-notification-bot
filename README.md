@@ -31,24 +31,39 @@ SNS Topic (teams-notifications-<env>)
 
 ## SNS Message Payload
 
-Publish a JSON message to the SNS topic:
+Publish a **simple** JSON message to the SNS topic — both Lambdas do all Teams
+formatting (Adaptive Card, colours, `@mentions`, link buttons) in Python, so
+producers only need to send plain data:
 
 ```json
 {
-  "title": "Deployment Complete",
+  "recipients": ["alice@example.com", "bob@example.com"],
+  "dateTime": ["2026-08-17T17:06:39Z"],
   "message": "The v2.1.0 release has been deployed to production.",
-  "mentions": [
-    "alice@example.com",
-    "bob@example.com"
-  ]
+  "links": [{ "title": "Release notes", "url": "https://example.com/releases" }],
+  "type": "info"
 }
 ```
 
-| Field      | Type           | Required | Description                                         |
-|------------|----------------|----------|-----------------------------------------------------|
-| `title`    | string         | No       | Card/message title (defaults to `"Notification"`)   |
-| `message`  | string         | No       | Main body text                                      |
-| `mentions` | list\[string\] | No       | Email addresses of users to `@mention`              |
+| Field        | Type                     | Required | Description                                                          |
+|--------------|--------------------------|----------|----------------------------------------------------------------------|
+| `recipients` | list\[string\]           | No       | Email addresses of users to `@mention` / send to                     |
+| `dateTime`   | string \| list\[string\] | No       | Timestamp(s) shown on the card                                       |
+| `message`    | string                   | No       | Main body text                                                       |
+| `links`      | list\[string \| object\] | No       | `"https://url"` or `{ "title": …, "url": … }`; rendered as buttons   |
+| `type`       | string                   | No       | `info` (default), `warning`, or `error` — controls the card colour   |
+| `title`      | string                   | No       | Optional card title (defaults to `"<Type> Notification"`)            |
+
+> **Backward compatible:** the legacy `{ "title", "message", "mentions" }` shape
+> is still accepted — `mentions` is treated as `recipients`.
+
+`type` maps to an Adaptive Card colour:
+
+| `type`    | Card colour / container style |
+|-----------|-------------------------------|
+| `info`    | `accent` (blue)               |
+| `warning` | `warning` (amber)             |
+| `error`   | `attention` (red)             |
 
 ---
 
@@ -56,14 +71,15 @@ Publish a JSON message to the SNS topic:
 
 ### How it works
 
-1. Receives SNS record and parses the JSON payload.
-2. For each email address in `mentions`, derives the display name from the
+1. Receives SNS record and parses the simple notification payload.
+2. For each email address in `recipients`, derives the display name from the
    local part (e.g. `alice@example.com` → `alice`) and builds a Teams mention
    entity with `mentioned.id` set to the email address directly — Teams accepts
    an email address as a valid user identifier in Adaptive Card mention entities,
    so **no Microsoft Graph API call is required**.
-3. Constructs an **Adaptive Card** (schema 1.0) with `msteams.entities` entries
-   for each mention, so Teams renders the familiar `@alice` mention pill.
+3. Constructs an **Adaptive Card** — colour-coded by `type`, with a title
+   container, the message body, optional `dateTime`, `links` rendered as buttons,
+   and `msteams.entities` entries so Teams renders the familiar `@alice` pill.
 4. POSTs the card to the channel's **Incoming Webhook** URL.
 
 ### Teams Configuration — Incoming Webhook
@@ -80,12 +96,15 @@ Publish a JSON message to the SNS topic:
 
 ### How it works
 
-1. Receives the SNS record and parses the payload.
-2. POSTs the `{ title, message, mentions }` object to the Power Automate
-   instant-cloud-flow HTTP trigger URL stored in SSM.
-3. The flow (which you configure in Power Automate) posts a message using the
-   **Teams Flow Bot** connector and can use the `mentions` list to `@mention`
-   specific users.
+1. Receives the SNS record and parses the simple notification payload.
+2. **Builds the Adaptive Card in Python** (same formatting as the webhook
+   Lambda — colour by `type`, `@mentions`, `dateTime`, `links`).
+3. For **each** recipient, POSTs `{ "recipient": "<email>", "card": { … } }` to
+   the Power Automate HTTP trigger URL stored in SSM (one request per recipient,
+   since the Flow Bot chat action targets a single recipient). When there are no
+   recipients, a single request is sent with an empty `recipient`.
+4. The flow only has to map two fields — `Recipient` and `Adaptive Card` — from
+   the trigger body, so **no formatting logic lives in Power Automate**.
 
 ### Power Automate Flow Configuration
 
@@ -102,18 +121,15 @@ Follow these steps to set up the flow:
 2. Click **+ Create → Instant cloud flow**.
 3. Choose **"When an HTTP request is received"** as the trigger and click
    **Create**.
-4. In the trigger card, set **Request Body JSON Schema**:
+4. In the trigger card, set **Request Body JSON Schema** (the Lambda posts a
+   ready-made card, so the flow only needs `recipient` and `card`):
 
 ```json
 {
   "type": "object",
   "properties": {
-    "title":    { "type": "string" },
-    "message":  { "type": "string" },
-    "mentions": {
-      "type": "array",
-      "items": { "type": "string" }
-    }
+    "recipient": { "type": "string" },
+    "card":      { "type": "object" }
   }
 }
 ```
@@ -121,48 +137,25 @@ Follow these steps to set up the flow:
 5. **Save** the flow — the trigger URL is generated and shown in the trigger card.
    Copy this URL and store it as `var.flow_trigger_url` in Terraform.
 
-#### Step 2 — Add a Teams "Post message in a chat or channel" action
+#### Step 2 — Add the "Post card in a chat or channel" action
 
 1. Click **+ New step**.
-2. Search for **Microsoft Teams** and choose **"Post message in a chat or channel"**.
-3. Configure:
+2. Search for **Microsoft Teams** and choose **"Post card in a chat or channel"**.
+3. Configure (matching the fields flagged in the Workflows screenshot):
    - **Post as**: `Flow bot`
-   - **Post in**: `Channel` (or `Chat`)
-   - **Team / Channel**: select the target team and channel.
-   - **Message**: use dynamic content — insert `triggerBody()?['title']` and
-     `triggerBody()?['message']` to compose the message body.
+   - **Post in**: `Chat with Flow bot`
+   - **Recipient**: dynamic content → `triggerBody()?['recipient']`
+   - **Adaptive Card**: dynamic content → `triggerBody()?['card']`
 
-#### Step 3 — @mentioning users (Flow Bot)
+That's it — the Lambda already built the coloured, `@mention`-rich Adaptive Card,
+so there is nothing else to configure. The Lambda sends one request per
+recipient, so each recipient receives their own 1-on-1 card from the Flow Bot.
 
-The Teams Flow Bot does **not** support `@mention` entities in the same way as
-incoming webhooks. To notify users you have two options:
+> **@mentions:** the card's `msteams.entities` are populated by the Lambda using
+> the recipient email addresses directly — **no Microsoft Graph lookup** and no
+> extra Azure AD permissions are required.
 
-**Option A — Adaptive Card with mention (recommended)**
-
-1. In the Teams action, switch **Message** to an **Adaptive Card** payload.
-2. Use the `mentions` array from the trigger body in a `for each` loop:
-   - Call the **Microsoft Graph HTTP** connector (or the Azure AD connector)
-     to look up each email: `GET https://graph.microsoft.com/v1.0/users/{email}`.
-   - Build a `msteams.entities` mention entity array as a flow variable.
-3. Compose the final Adaptive Card JSON referencing the mention entities, then
-   pass it as the card body in the Teams action.
-
-   > This requires the flow's connection to have `User.Read.All` delegated
-   > permission in the Azure AD app used by the **HTTP with Azure AD** connector.
-
-**Option B — Direct chat message per user**
-
-1. Add a **"Apply to each"** loop over `triggerBody()?['mentions']`.
-2. Inside the loop, add a **"Post message in a chat or channel"** action:
-   - **Post as**: `Flow bot`
-   - **Post in**: `Chat with Flow bot user`
-   - **Recipient**: the current email address from the loop.
-   - **Message**: compose a personalised message.
-
-This sends each mentioned user a **1-on-1 chat** from the Flow Bot — no Graph
-permission is required because the flow bot posts directly to that user's chat.
-
-#### Step 4 — Secure the HTTP trigger (optional but recommended)
+#### Step 3 — Secure the HTTP trigger (optional but recommended)
 
 Power Automate HTTP triggers include a `sig` query parameter for HMAC
 verification. Additionally:
@@ -240,8 +233,10 @@ terraform apply \
 
 ## Test Harness — `scripts/send-notification.sh`
 
-`scripts/send-notification.sh` lets you trigger and test **both** delivery
-scenarios from a single command by feeding it a properly-formatted notification.
+`scripts/send-notification.sh` forwards a **simple** notification to the SNS
+topic (or directly to an HTTP trigger) so you can exercise the Lambdas
+end-to-end. All Teams formatting happens in the Python Lambdas, so the script
+just sends the plain notification JSON — no card building.
 
 ### Notification schema
 
@@ -257,13 +252,13 @@ scenarios from a single command by feeding it a properly-formatted notification.
 
 | Field        | Type                 | Required | Description                                                        |
 |--------------|----------------------|----------|--------------------------------------------------------------------|
-| `recipients` | list\[string\]       | Yes      | Emails to `@mention` (webhook) / send to (Flow Bot recipient)      |
+| `recipients` | list\[string\]       | No       | Emails to `@mention` / send to                                     |
 | `dateTime`   | list\[string\]       | No       | Timestamp(s); defaults to the current UTC time when built by flags |
 | `message`    | string               | Yes      | Main body text                                                     |
 | `links`      | list\[string\|object\] | No     | `"https://url"` or `{ "title": …, "url": … }`; rendered as buttons |
 | `type`       | string               | No       | `info` (default), `warning`, or `error`                            |
 
-`type` maps to an Adaptive Card colour used in the webhook scenario:
+`type` is forwarded as-is; the Lambdas map it to an Adaptive Card colour:
 
 | `type`    | Card colour / container style |
 |-----------|-------------------------------|
@@ -273,26 +268,28 @@ scenarios from a single command by feeding it a properly-formatted notification.
 
 ### What it sends
 
-| Scenario                 | Target flag | Payload posted                                               |
+Every target receives the **same simple notification JSON** shown above; the
+Python Lambdas turn it into a formatted Teams Adaptive Card downstream.
+
+| Target                   | Flag        | Payload posted                                              |
 |--------------------------|-------------|-------------------------------------------------------------|
-| Teams Incoming Webhook   | `--webhook` | An **Adaptive Card** built from the notification (coloured by `type`, with `@mentions`, date/time, and link buttons) |
-| Power Automate Flow Bot  | `--flow`    | The **raw notification JSON** (schema above)                |
-| SNS end-to-end (Lambdas) | `--sns`     | The **raw notification JSON**, published to the SNS topic   |
+| SNS topic (Lambdas)      | `--sns`     | The notification JSON, published to the SNS topic (recommended) |
+| Power Automate / HTTP    | `--flow`    | The notification JSON, POSTed to the HTTP trigger           |
+| Webhook / HTTP endpoint  | `--webhook` | The notification JSON, POSTed to the URL                    |
 
 Requirements: `bash`, `jq`, `curl` (and the AWS CLI for `--sns`).
 
 ### Usage
 
 ```bash
-# Preview both payloads without sending (dry run)
+# Preview the notification JSON without sending (dry run)
 scripts/send-notification.sh -m "Deploy finished" -r alice@example.com -t info --dry-run
 
-# Test both HTTP scenarios directly
+# Publish a simple message to SNS (drives the real Lambdas)
 scripts/send-notification.sh \
   -m "Disk almost full" -r ops@example.com -t warning \
   -l "Runbook=https://wiki/df" \
-  --webhook "https://outlook.office.com/webhook/..." \
-  --flow    "https://prod-xx.westus.logic.azure.com/..."
+  --sns arn:aws:sns:us-east-1:123456789012:teams-notifications-dev
 
 # Read a prepared file and publish to SNS end-to-end
 scripts/send-notification.sh --file scripts/examples/notification.json \

@@ -2,16 +2,17 @@
 #
 # send-notification.sh
 # ---------------------
-# Test harness for the ms-teams-notification-bot. It builds a notification from
-# the canonical JSON schema and triggers/tests BOTH delivery scenarios from a
-# single command:
+# Test harness for the ms-teams-notification-bot. It assembles a *simple*
+# notification from the canonical JSON schema and forwards it, unchanged, to the
+# chosen target(s). All Teams formatting (Adaptive Card, colours, @mentions,
+# link buttons) is done in the Python Lambdas — this script only forwards the
+# simple message, exactly as a real producer would publish to SNS.
 #
-#   1. Teams Incoming Webhook  -> POST an Adaptive Card to a webhook URL.
-#   2. Power Automate Flow Bot -> POST the raw notification JSON to an HTTP
-#                                 trigger URL.
-#
-# It can also publish the notification JSON to the SNS topic so the real
-# Lambdas are exercised end-to-end.
+# Targets:
+#   1. SNS topic              -> publish the notification JSON (drives the real
+#                                Lambdas end-to-end; the recommended path).
+#   2. Power Automate / HTTP  -> POST the notification JSON to an HTTP trigger.
+#   3. Webhook / HTTP         -> POST the notification JSON to an HTTP endpoint.
 #
 # Canonical notification schema (built from flags or read with --file/--stdin):
 #
@@ -23,7 +24,7 @@
 #     "type":       "info"                                                    // optional: info|warning|error
 #   }
 #
-# `type` controls the Adaptive Card colour used for the webhook scenario:
+# `type` is forwarded as-is; the Lambdas map it to an Adaptive Card colour:
 #   info    -> accent    (blue)
 #   warning -> warning   (amber)
 #   error   -> attention (red)
@@ -57,25 +58,24 @@ Input (alternative to the fields above):
       --stdin               Read the notification JSON from standard input
 
 Targets (any combination; falls back to the matching env var when value omitted):
-  -w, --webhook [URL]       Teams Incoming Webhook URL   (env: WEBHOOK_URL)
-  -F, --flow [URL]          Power Automate HTTP trigger  (env: FLOW_TRIGGER_URL)
   -s, --sns [TOPIC_ARN]     SNS topic ARN                (env: SNS_TOPIC_ARN)
-      --all                 Use WEBHOOK_URL, FLOW_TRIGGER_URL and SNS_TOPIC_ARN
+  -F, --flow [URL]          Power Automate HTTP trigger  (env: FLOW_TRIGGER_URL)
+  -w, --webhook [URL]       HTTP endpoint / webhook URL  (env: WEBHOOK_URL)
+      --all                 Use SNS_TOPIC_ARN, FLOW_TRIGGER_URL and WEBHOOK_URL
                             from the environment.
 
 Options:
-  -n, --dry-run             Print the payloads without sending anything
+  -n, --dry-run             Print the notification JSON without sending anything
   -h, --help                Show this help and exit
 
 Examples:
-  # Dry-run: preview both payloads
+  # Dry-run: preview the notification JSON
   $PROG -m "Deploy finished" -r alice@example.com -t info --dry-run
 
-  # Test both HTTP scenarios directly
+  # Publish a simple message to SNS (drives the real Lambdas)
   $PROG -m "Disk almost full" -r ops@example.com -t warning \\
         -l "Runbook=https://wiki/df" \\
-        --webhook https://outlook.office.com/webhook/... \\
-        --flow    https://prod-xx.logic.azure.com/...
+        --sns arn:aws:sns:us-east-1:123456789012:teams-notifications-dev
 
   # Read a prepared notification file and publish to SNS end-to-end
   $PROG --file scripts/examples/notification.json --sns arn:aws:sns:...:topic
@@ -210,54 +210,8 @@ case "$ntype" in
 esac
 
 # ---------------------------------------------------------------------------
-# Build the Adaptive Card (webhook scenario) from the notification JSON
-# ---------------------------------------------------------------------------
-# shellcheck disable=SC2016  # jq programs are intentionally single-quoted
-build_card='
-  (.type // "info")                                             as $type |
-  ({ "info": "accent",   "warning": "warning",  "error": "attention" }[$type] // "accent")   as $color |
-  ({ "info": "accent",   "warning": "warning",  "error": "attention" }[$type] // "accent")   as $style |
-  (.title // (($type | ascii_upcase) + " Notification"))        as $title |
-  (.recipients // [])                                           as $recips |
-  (.dateTime // [])                                             as $dts |
-  (.links // [])                                                as $links |
-  ($recips | map(. as $e | ($e | split("@")[0]) as $d
-                 | { type: "mention", text: ("<at>" + $d + "</at>"),
-                     mentioned: { id: $e, name: $d } }))        as $entities |
-  ($recips | map("<at>" + (split("@")[0]) + "</at>") | join(" ")) as $tags |
-  (if ($tags | length) > 0 then (.message + "\n\n" + $tags) else .message end) as $body |
-  ($links | map({ type: "Action.OpenUrl",
-                  title: (.title // .url // "Open"),
-                  url: (.url // .title // "") })
-          | map(select(.url != "")))                           as $actions |
-  {
-    type: "message",
-    attachments: [{
-      contentType: "application/vnd.microsoft.card.adaptive",
-      content: ({
-        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-        type: "AdaptiveCard",
-        version: "1.4",
-        body: ([
-          { type: "Container", style: $style, bleed: true, items: [
-            { type: "TextBlock", size: "Large", weight: "Bolder",
-              color: $color, text: $title, wrap: true }
-          ]},
-          { type: "TextBlock", text: $body, wrap: true }
-        ] + (if ($dts | length) > 0
-             then [{ type: "TextBlock", spacing: "Small", isSubtle: true,
-                     size: "Small", wrap: true,
-                     text: ("🕒 " + ($dts | join(", "))) }]
-             else [] end)),
-        msteams: { entities: $entities }
-      } + (if ($actions | length) > 0 then { actions: $actions } else {} end))
-    }]
-  }'
-
-card="$(echo "$notification" | jq "$build_card")"
-
-# ---------------------------------------------------------------------------
-# Deliver
+# Deliver — every target receives the same simple notification JSON. All Teams
+# formatting is performed downstream by the Python Lambdas.
 # ---------------------------------------------------------------------------
 post_json() {
   local url="$1" body="$2" label="$3" tmp code
@@ -284,12 +238,9 @@ any_target=false
 
 if [ "$dry_run" = true ] || [ "$any_target" = false ]; then
   [ "$any_target" = false ] && [ "$dry_run" = false ] && \
-    echo "No target specified; showing a dry run. Use --webhook/--flow/--sns to send." >&2
-  echo "=== Notification JSON (flow / SNS payload) ==="
+    echo "No target specified; showing a dry run. Use --sns/--flow/--webhook to send." >&2
+  echo "=== Notification JSON (SNS / flow / webhook payload) ==="
   echo "$notification" | jq .
-  echo
-  echo "=== Adaptive Card (webhook payload) ==="
-  echo "$card" | jq .
   exit 0
 fi
 
@@ -297,7 +248,7 @@ rc=0
 
 if [ "$want_webhook" = true ]; then
   [ -n "$webhook_url" ] || die "webhook target selected but no URL given (flag or WEBHOOK_URL)"
-  post_json "$webhook_url" "$card" "webhook" || rc=1
+  post_json "$webhook_url" "$notification" "webhook" || rc=1
 fi
 
 if [ "$want_flow" = true ]; then
