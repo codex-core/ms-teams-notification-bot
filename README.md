@@ -238,9 +238,77 @@ terraform apply \
 
 ---
 
+## Test Harness — `scripts/send-notification.sh`
+
+`scripts/send-notification.sh` lets you trigger and test **both** delivery
+scenarios from a single command by feeding it a properly-formatted notification.
+
+### Notification schema
+
+```json
+{
+  "recipients": ["alice@example.com", "bob@example.com"],
+  "dateTime":   ["2026-08-17T17:06:39Z"],
+  "message":    "The v2.1.0 release has been deployed to production.",
+  "links":      [{ "title": "Runbook", "url": "https://example.com/runbook" }],
+  "type":       "info"
+}
+```
+
+| Field        | Type                 | Required | Description                                                        |
+|--------------|----------------------|----------|--------------------------------------------------------------------|
+| `recipients` | list\[string\]       | Yes      | Emails to `@mention` (webhook) / send to (Flow Bot recipient)      |
+| `dateTime`   | list\[string\]       | No       | Timestamp(s); defaults to the current UTC time when built by flags |
+| `message`    | string               | Yes      | Main body text                                                     |
+| `links`      | list\[string\|object\] | No     | `"https://url"` or `{ "title": …, "url": … }`; rendered as buttons |
+| `type`       | string               | No       | `info` (default), `warning`, or `error`                            |
+
+`type` maps to an Adaptive Card colour used in the webhook scenario:
+
+| `type`    | Card colour / container style |
+|-----------|-------------------------------|
+| `info`    | `accent` (blue)               |
+| `warning` | `warning` (amber)             |
+| `error`   | `attention` (red)             |
+
+### What it sends
+
+| Scenario                 | Target flag | Payload posted                                               |
+|--------------------------|-------------|-------------------------------------------------------------|
+| Teams Incoming Webhook   | `--webhook` | An **Adaptive Card** built from the notification (coloured by `type`, with `@mentions`, date/time, and link buttons) |
+| Power Automate Flow Bot  | `--flow`    | The **raw notification JSON** (schema above)                |
+| SNS end-to-end (Lambdas) | `--sns`     | The **raw notification JSON**, published to the SNS topic   |
+
+Requirements: `bash`, `jq`, `curl` (and the AWS CLI for `--sns`).
+
+### Usage
+
+```bash
+# Preview both payloads without sending (dry run)
+scripts/send-notification.sh -m "Deploy finished" -r alice@example.com -t info --dry-run
+
+# Test both HTTP scenarios directly
+scripts/send-notification.sh \
+  -m "Disk almost full" -r ops@example.com -t warning \
+  -l "Runbook=https://wiki/df" \
+  --webhook "https://outlook.office.com/webhook/..." \
+  --flow    "https://prod-xx.westus.logic.azure.com/..."
+
+# Read a prepared file and publish to SNS end-to-end
+scripts/send-notification.sh --file scripts/examples/notification.json \
+  --sns arn:aws:sns:us-east-1:123456789012:teams-notifications-dev
+```
+
+Target URLs/ARNs can also come from the `WEBHOOK_URL`, `FLOW_TRIGGER_URL`, and
+`SNS_TOPIC_ARN` environment variables (use `--all` to send to all three). Run
+`scripts/send-notification.sh --help` for the full option list.
+
+---
+
 ## Running Tests
 
 ```bash
 pip install pytest
 python -m pytest tests/ -v
 ```
+
