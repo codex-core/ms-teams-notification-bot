@@ -4,7 +4,7 @@ An AWS Lambda-based notification system that posts messages to Microsoft Teams
 via two mechanisms:
 
 1. **Teams Incoming Webhook** — sends an Adaptive Card with optional `@mention`
-   support (users looked up by email address via Microsoft Graph).
+   support using email addresses directly (no Microsoft Graph API required).
 2. **Power Automate Flow Bot** — triggers a Power Automate instant cloud flow
    that delivers messages through the Teams Flow Bot.
 
@@ -20,10 +20,7 @@ SNS Topic (teams-notifications-<env>)
         │
         ├──► Lambda: teams-webhook-notification-<env>
         │          │
-        │          ├── SSM: /teams-bot/webhook-url          (Teams Incoming Webhook URL)
-        │          ├── SSM: /teams-bot/graph-tenant-id      (Azure AD tenant)
-        │          ├── SSM: /teams-bot/graph-client-id      (Azure AD app client ID)
-        │          └── SSM: /teams-bot/graph-client-secret  (Azure AD app client secret)
+        │          └── SSM: /teams-bot/webhook-url          (Teams Incoming Webhook URL)
         │
         └──► Lambda: teams-flow-bot-notification-<env>
                    │
@@ -55,16 +52,18 @@ Publish a JSON message to the SNS topic:
 
 ---
 
-## Lambda 1 — Teams Incoming Webhook (`@mention` via MS Graph)
+## Lambda 1 — Teams Incoming Webhook (`@mention` via email)
 
 ### How it works
 
 1. Receives SNS record and parses the JSON payload.
-2. If `mentions` are present, acquires an OAuth 2.0 token from Azure AD using
-   client credentials and calls `GET /v1.0/users/{email}` on Microsoft Graph
-   to resolve each email address to an AAD user object ID and display name.
-3. Constructs an **Adaptive Card** (schema 1.4) with `msteams.entities` entries
-   for each mention, so Teams renders the familiar `@Alice` pill.
+2. For each email address in `mentions`, derives the display name from the
+   local part (e.g. `alice@example.com` → `alice`) and builds a Teams mention
+   entity with `mentioned.id` set to the email address directly — Teams accepts
+   an email address as a valid user identifier in Adaptive Card mention entities,
+   so **no Microsoft Graph API call is required**.
+3. Constructs an **Adaptive Card** (schema 1.0) with `msteams.entities` entries
+   for each mention, so Teams renders the familiar `@alice` mention pill.
 4. POSTs the card to the channel's **Incoming Webhook** URL.
 
 ### Teams Configuration — Incoming Webhook
@@ -74,20 +73,6 @@ Publish a JSON message to the SNS topic:
 3. Click **Create** and copy the generated webhook URL.
 4. Store the URL as `var.teams_webhook_url` when running Terraform (it is saved
    to SSM as a `SecureString`).
-
-### Azure AD App Registration (for @mention resolution)
-
-To look up users by email you need an app registration with `User.Read.All`
-application permission in Microsoft Graph:
-
-1. **Azure Portal → Azure Active Directory → App registrations → New registration**.
-2. Name: `ms-teams-notification-bot` (or similar), Supported account types: *Single tenant*.
-3. After creation, note the **Application (client) ID** and **Directory (tenant) ID**.
-4. **Certificates & secrets → New client secret** — copy the value immediately.
-5. **API permissions → Add a permission → Microsoft Graph → Application permissions**:
-   - `User.Read.All`
-6. Click **Grant admin consent** for your tenant.
-7. Supply `tenant_id`, `client_id`, and `client_secret` as Terraform variables.
 
 ---
 
@@ -207,21 +192,15 @@ terraform init
 
 terraform apply \
   -var="teams_webhook_url=https://YOUR_TENANT.webhook.office.com/..." \
-  -var="graph_tenant_id=YOUR_AAD_TENANT_ID" \
-  -var="graph_client_id=YOUR_AAD_CLIENT_ID" \
-  -var="graph_client_secret=YOUR_AAD_CLIENT_SECRET" \
   -var="flow_trigger_url=https://prod-xx.westus.logic.azure.com:443/..."
 ```
 
-| Variable              | Description                                      |
-|-----------------------|--------------------------------------------------|
-| `teams_webhook_url`   | Teams channel Incoming Webhook URL               |
-| `graph_tenant_id`     | Azure AD tenant ID                               |
-| `graph_client_id`     | Azure AD app client ID                           |
-| `graph_client_secret` | Azure AD app client secret                       |
-| `flow_trigger_url`    | Power Automate HTTP trigger URL                  |
-| `aws_region`          | AWS region (default: `us-east-1`)                |
-| `environment`         | Deployment environment tag (default: `dev`)      |
+| Variable            | Description                                                   |
+|---------------------|---------------------------------------------------------------|
+| `teams_webhook_url` | Teams channel Incoming Webhook URL                            |
+| `flow_trigger_url`  | Power Automate HTTP trigger URL                               |
+| `aws_region`        | AWS region (default: `us-east-1`)                             |
+| `environment`       | Deployment environment tag (default: `dev`)                   |
 
 ### Resources created
 
@@ -231,7 +210,7 @@ terraform apply \
 | `aws_lambda_function` ×2          | Webhook Lambda and Flow Bot Lambda            |
 | `aws_iam_role`                    | Shared Lambda execution role                  |
 | `aws_iam_policy` (SSM)            | Grants SSM `GetParameter` + KMS `Decrypt`     |
-| `aws_ssm_parameter` ×5            | `SecureString` parameters for all secrets     |
+| `aws_ssm_parameter` ×2            | `SecureString` parameters for webhook URL and flow trigger URL |
 | `aws_sns_topic_subscription` ×2   | Subscribe each Lambda to the SNS topic        |
 | `aws_lambda_permission` ×2        | Allow SNS to invoke each Lambda               |
 
@@ -243,7 +222,7 @@ terraform apply \
 .
 ├── lambdas/
 │   ├── teams_webhook_lambda/
-│   │   └── handler.py          # Incoming Webhook + @mention via MS Graph
+│   │   └── handler.py          # Incoming Webhook + @mention via email (no Graph)
 │   └── flow_bot_lambda/
 │       └── handler.py          # Power Automate HTTP trigger
 ├── terraform/

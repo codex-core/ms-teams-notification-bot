@@ -4,36 +4,9 @@
 
 resource "aws_ssm_parameter" "teams_webhook_url" {
   name        = "/teams-bot/webhook-url"
-  description = "Microsoft Teams Incoming Webhook URL"
+  description = "Microsoft Teams Incoming Webhook URL (or Power Automate HTTP trigger URL)"
   type        = "SecureString"
   value       = var.teams_webhook_url
-
-  tags = local.common_tags
-}
-
-resource "aws_ssm_parameter" "graph_tenant_id" {
-  name        = "/teams-bot/graph-tenant-id"
-  description = "Azure AD tenant ID"
-  type        = "SecureString"
-  value       = var.graph_tenant_id
-
-  tags = local.common_tags
-}
-
-resource "aws_ssm_parameter" "graph_client_id" {
-  name        = "/teams-bot/graph-client-id"
-  description = "Azure AD app registration client ID"
-  type        = "SecureString"
-  value       = var.graph_client_id
-
-  tags = local.common_tags
-}
-
-resource "aws_ssm_parameter" "graph_client_secret" {
-  name        = "/teams-bot/graph-client-secret"
-  description = "Azure AD app registration client secret"
-  type        = "SecureString"
-  value       = var.graph_client_secret
 
   tags = local.common_tags
 }
@@ -86,9 +59,6 @@ data "aws_iam_policy_document" "lambda_ssm" {
     actions = ["ssm:GetParameter"]
     resources = [
       aws_ssm_parameter.teams_webhook_url.arn,
-      aws_ssm_parameter.graph_tenant_id.arn,
-      aws_ssm_parameter.graph_client_id.arn,
-      aws_ssm_parameter.graph_client_secret.arn,
       aws_ssm_parameter.flow_trigger_url.arn,
     ]
   }
@@ -138,10 +108,7 @@ resource "aws_lambda_function" "teams_webhook" {
 
   environment {
     variables = {
-      TEAMS_WEBHOOK_URL_PARAM    = aws_ssm_parameter.teams_webhook_url.name
-      GRAPH_TENANT_ID_PARAM      = aws_ssm_parameter.graph_tenant_id.name
-      GRAPH_CLIENT_ID_PARAM      = aws_ssm_parameter.graph_client_id.name
-      GRAPH_CLIENT_SECRET_PARAM  = aws_ssm_parameter.graph_client_secret.name
+      TEAMS_WEBHOOK_URL_PARAM = aws_ssm_parameter.teams_webhook_url.name
     }
   }
 

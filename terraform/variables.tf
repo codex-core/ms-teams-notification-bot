@@ -11,25 +11,7 @@ variable "environment" {
 }
 
 variable "teams_webhook_url" {
-  description = "Microsoft Teams Incoming Webhook URL"
-  type        = string
-  sensitive   = true
-}
-
-variable "graph_tenant_id" {
-  description = "Azure AD tenant ID for Microsoft Graph API"
-  type        = string
-  sensitive   = true
-}
-
-variable "graph_client_id" {
-  description = "Azure AD app registration client ID for Microsoft Graph API"
-  type        = string
-  sensitive   = true
-}
-
-variable "graph_client_secret" {
-  description = "Azure AD app registration client secret for Microsoft Graph API"
+  description = "Microsoft Teams Incoming Webhook URL (or Power Automate HTTP trigger URL for the webhook lambda)"
   type        = string
   sensitive   = true
 }
